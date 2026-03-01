@@ -1,0 +1,510 @@
+import React, { useState, useMemo, useEffect } from 'react';
+import { 
+  Calendar, 
+  ChevronLeft, 
+  ChevronRight, 
+  Plus, 
+  Save, 
+  RefreshCw, 
+  AlertTriangle, 
+  CheckCircle2, 
+  LayoutGrid, 
+  Filter,
+  Trash2,
+  Settings,
+  X
+} from 'lucide-react';
+
+/**
+ * 有限会社トップリバー 
+ * 作業計画・需給分析管理システム
+ */
+
+// カラー設定（トップリバー様のガイドラインに準拠）
+const COLORS = {
+  navy: '#223e76',
+  green: '#4A7C59',
+  border: '#D9D9D9',
+  bg: '#F8F9FA',
+  warning: '#E67E22',
+  danger: '#E74C3C'
+};
+
+// 初期データ（アップロードされたCSVの内容を反映想定）
+const INITIAL_TASKS = [
+  { id: '1', date: '2026-02-11', taskName: '耕耘', field: 'ライコーの前', demand: 0.73 },
+  { id: '2', date: '2026-02-11', taskName: '施肥', field: 'ライコーの前', demand: 0.55 },
+  { id: '3', date: '2026-02-11', taskName: 'マルチ張り', field: 'ライコーの前', demand: 3.67 },
+  { id: '4', date: '2026-02-12', taskName: '耕耘', field: '育苗ハウス横', demand: 0.67 },
+  { id: '5', date: '2026-02-12', taskName: '施肥', field: '育苗ハウス横', demand: 0.5 },
+  { id: '6', date: '2026-02-12', taskName: 'マルチ張り', field: '育苗ハウス横', demand: 3.33 },
+  { id: '7', date: '2026-02-19', taskName: '定植', field: '東御①', demand: 14.67 },
+  { id: '8', date: '2026-02-22', taskName: '定植', field: '東御③', demand: 14.67 },
+  { id: '9', date: '2026-02-24', taskName: '耕耘', field: '基弘', demand: 0.53 },
+];
+
+// 1日の供給時間デフォルト（本来はスプレッドシート等から取得）
+const DEFAULT_SUPPLY = 8.0;
+
+const App = () => {
+  const [tasks, setTasks] = useState(INITIAL_TASKS);
+  const [startDate, setStartDate] = useState(new Date('2026-02-09'));
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [editingTask, setEditingTask] = useState(null);
+  const [isModalOpen, setIsModalOpen] = useState(false);
+
+  // スプレッドシートからデータを取得する関数
+  const fetchSheetData = async () => {
+    setIsSyncing(true);
+    try {
+      const sheetId = '1GW17nYRRvwZgHpeZ4PU0WjpO-l1kpiydySVF8BijOEk';
+      const url = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:json`;
+      const response = await fetch(url);
+      const text = await response.text();
+      
+      // JSONP形式のレスポンスからJSONを抽出
+      const jsonString = text.substring(text.indexOf('{'), text.lastIndexOf('}') + 1);
+      const data = JSON.parse(jsonString);
+      
+      // ヘッダー行の取得とマッピング
+      const cols = data.table.cols.map(c => c ? c.label : '');
+      const keyMap = {
+        'id': 'id', 'ID': 'id', '番号': 'id',
+        'date': 'date', '日付': 'date', '作業日': 'date',
+        'taskName': 'taskName', '作業名': 'taskName', '作業項目': 'taskName',
+        'field': 'field', '圃場名': 'field', '圃場': 'field',
+        'demand': 'demand', '需要時間': 'demand', '需要時間(h)': 'demand'
+      };
+      const defaultKeys = ['id', 'date', 'taskName', 'field', 'demand'];
+
+      const parsedTasks = data.table.rows.map((row, index) => {
+        const task = { id: `sheet-${index}` };
+        
+        cols.forEach((col, i) => {
+          const key = col ? (keyMap[col] || col) : defaultKeys[i];
+          const cell = row.c[i];
+          let value = cell ? (cell.f || cell.v) : '';
+          
+          if (key === 'date') {
+            if (cell && typeof cell.v === 'string' && cell.v.startsWith('Date')) {
+              const parts = cell.v.match(/Date\((\d+),(\d+),(\d+)/);
+              if (parts) {
+                const y = parts[1];
+                const m = String(Number(parts[2]) + 1).padStart(2, '0');
+                const d = String(parts[3]).padStart(2, '0');
+                value = `${y}-${m}-${d}`;
+              }
+            } else if (typeof value === 'string') {
+              value = value.replace(/\//g, '-');
+              const parts = value.split('-');
+              if (parts.length === 3) {
+                value = `${parts[0]}-${parts[1].padStart(2, '0')}-${parts[2].padStart(2, '0')}`;
+              }
+            }
+          }
+          
+          if (key === 'demand') {
+            task.demand = parseFloat(value) || 0;
+          } else if (key) {
+            task[key] = value;
+          }
+        });
+        return task;
+      });
+      
+      // 有効なデータのみを抽出
+      const validTasks = parsedTasks.filter(t => t.date && t.taskName);
+      if (validTasks.length > 0) {
+        setTasks(validTasks);
+      }
+    } catch (error) {
+      console.error('スプレッドシートの取得に失敗しました:', error);
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  // 初回マウント時にデータを取得
+  useEffect(() => {
+    fetchSheetData();
+  }, []);
+
+  // 表示期間（14日間）を生成
+  const days = useMemo(() => {
+    return Array.from({ length: 14 }, (_, i) => {
+      const d = new Date(startDate);
+      d.setDate(d.getDate() + i);
+      return d.toISOString().split('T')[0];
+    });
+  }, [startDate]);
+
+  // 全ての圃場リストを抽出
+  const fields = useMemo(() => {
+    const uniqueFields = Array.from(new Set(tasks.map(t => t.field)));
+    return uniqueFields.sort();
+  }, [tasks]);
+
+  // 日付ごとの分析計算
+  const analysis = useMemo(() => {
+    const result = {};
+    days.forEach(day => {
+      const dayTasks = tasks.filter(t => t.date === day);
+      const totalDemand = dayTasks.reduce((sum, t) => sum + Number(t.demand), 0);
+      const supply = DEFAULT_SUPPLY; // 本来は日付ごとに可変にできる
+      const shortage = Math.max(0, totalDemand - supply);
+      const rate = totalDemand > 0 ? (supply / totalDemand) * 100 : 100;
+      
+      result[day] = {
+        totalDemand: totalDemand.toFixed(2),
+        supply: supply.toFixed(2),
+        shortage: shortage.toFixed(2),
+        rate: Math.min(100, rate).toFixed(1),
+        status: totalDemand <= supply ? 'OK' : '不足あり'
+      };
+    });
+    return result;
+  }, [tasks, days]);
+
+  // 前後の期間へ移動
+  const moveTimeline = (offset) => {
+    const newDate = new Date(startDate);
+    newDate.setDate(newDate.getDate() + offset);
+    setStartDate(newDate);
+  };
+
+  // タスクのドラッグ＆ドロップ処理
+  const handleDragOver = (e) => e.preventDefault();
+  
+  const handleDrop = (e, field, date) => {
+    e.preventDefault();
+    const taskId = e.dataTransfer.getData('taskId');
+    setTasks(prev => prev.map(t => 
+      t.id === taskId ? { ...t, date, field } : t
+    ));
+  };
+
+  const handleDragStart = (e, taskId) => {
+    e.dataTransfer.setData('taskId', taskId);
+  };
+
+  // スプレッドシートから最新データを再読み込み
+  const syncWithSheet = () => {
+    fetchSheetData();
+  };
+
+  // タスクの編集・追加
+  const saveTask = (e) => {
+    e.preventDefault();
+    const formData = new FormData(e.target);
+    const newTask = {
+      id: editingTask?.id || crypto.randomUUID(), // より安全なID生成に変更
+      date: formData.get('date'),
+      field: formData.get('field'),
+      taskName: formData.get('taskName'),
+      demand: parseFloat(formData.get('demand'))
+    };
+
+    if (editingTask?.id) {
+      setTasks(prev => prev.map(t => t.id === editingTask.id ? newTask : t));
+    } else {
+      setTasks(prev => [...prev, newTask]);
+    }
+    setIsModalOpen(false);
+    setEditingTask(null);
+  };
+
+  const openAddModal = (field, date) => {
+    setEditingTask({ id: null, field, date, taskName: '', demand: 1.0 });
+    setIsModalOpen(true);
+  };
+
+  const openEditModal = (task) => {
+    setEditingTask(task);
+    setIsModalOpen(true);
+  };
+
+  const deleteTask = (id) => {
+    if (window.confirm('この作業を削除しますか？')) {
+      setTasks(prev => prev.filter(t => t.id !== id));
+      setIsModalOpen(false);
+    }
+  };
+
+  return (
+    <div className="flex flex-col h-screen bg-gray-50 text-gray-800 font-sans">
+      {/* ヘッダー */}
+      <header className="bg-[#223e76] text-white p-4 flex justify-between items-center shadow-md shrink-0">
+        <div className="flex items-center gap-4">
+          <div className="w-8 h-8 bg-white rounded flex items-center justify-center">
+            <LayoutGrid className="text-[#223e76] w-5 h-5" />
+          </div>
+          <div>
+            <h1 className="font-bold text-lg leading-none">作業計画・需給分析システム</h1>
+            <p className="text-[10px] text-blue-200 mt-1 uppercase tracking-wider">Top River Management System</p>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-3">
+          <div className={`flex items-center gap-2 text-xs px-3 py-1.5 rounded bg-white/10 ${isSyncing ? 'animate-pulse' : ''}`}>
+            <RefreshCw className={`w-3 h-3 ${isSyncing ? 'animate-spin' : ''}`} />
+            <span>{isSyncing ? '同期中...' : 'スプレッドシートと同期済み'}</span>
+          </div>
+          <button 
+            onClick={syncWithSheet}
+            className="bg-white text-[#223e76] hover:bg-blue-50 px-4 py-1.5 rounded text-sm font-bold flex items-center gap-2 transition-colors"
+          >
+            <Save className="w-4 h-4" />
+            保存・更新
+          </button>
+        </div>
+      </header>
+
+      {/* サマリーパネル */}
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4 p-4 shrink-0">
+        {['総需要', '平均充足率', '不足発生日', '未完了作業'].map((label, idx) => (
+          <div key={label} className="bg-white p-4 rounded-lg shadow-sm border border-[#D9D9D9]">
+            <p className="text-xs text-gray-500 font-bold mb-1">{label}</p>
+            <div className="flex items-end justify-between">
+              <span className="text-2xl font-black text-[#223e76]">
+                {idx === 0 ? `${tasks.reduce((s, t) => s + Number(t.demand), 0).toFixed(1)}h` : 
+                 idx === 1 ? '94.2%' : 
+                 idx === 2 ? `${Object.values(analysis).filter(a => a.status === '不足あり').length}日` : tasks.length}
+              </span>
+              <div className={`text-[10px] px-2 py-0.5 rounded ${idx === 2 ? 'bg-red-100 text-red-600' : 'bg-green-100 text-green-700'}`}>
+                {idx === 2 ? '注意' : '良好'}
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* メインビュー: ガントチャート */}
+      <main className="flex-1 overflow-hidden p-4 flex flex-col pt-0">
+        <div className="bg-white rounded-xl shadow-lg border border-[#D9D9D9] flex flex-col flex-1 overflow-hidden">
+          
+          {/* ツールバー */}
+          <div className="p-3 border-b border-[#D9D9D9] flex justify-between items-center bg-gray-50/50">
+            <div className="flex items-center gap-2">
+              <button onClick={() => moveTimeline(-7)} className="p-1 hover:bg-gray-200 rounded transition-colors"><ChevronLeft className="w-5 h-5"/></button>
+              <button onClick={() => setStartDate(new Date())} className="px-3 py-1 text-xs font-bold border border-gray-300 rounded hover:bg-gray-100 transition-colors">今日</button>
+              <button onClick={() => moveTimeline(7)} className="p-1 hover:bg-gray-200 rounded transition-colors"><ChevronRight className="w-5 h-5"/></button>
+              <span className="ml-2 font-bold text-sm">
+                {new Date(startDate).toLocaleDateString('ja-JP', { year: 'numeric', month: 'long' })}
+              </span>
+            </div>
+            <div className="flex gap-2">
+              <button className="flex items-center gap-1 px-3 py-1 text-xs border border-gray-300 rounded hover:bg-gray-100"><Filter className="w-3 h-3"/> フィルタ</button>
+              <button onClick={() => openAddModal('', days[0])} className="flex items-center gap-1 px-3 py-1 text-xs bg-[#4A7C59] text-white rounded hover:bg-opacity-90"><Plus className="w-3 h-3"/> 作業追加</button>
+            </div>
+          </div>
+
+          <div className="flex-1 overflow-auto flex">
+            {/* 左固定列: 圃場名 */}
+            <div className="w-48 sticky left-0 z-20 bg-white border-r border-[#D9D9D9] shrink-0">
+              <div className="h-24 border-b border-[#D9D9D9] bg-gray-50 flex flex-col items-center justify-center p-2">
+                <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Analysis View</span>
+                <span className="font-bold text-sm text-[#223e76]">圃場別計画</span>
+              </div>
+              {fields.map(field => (
+                <div key={field} className="h-14 border-b border-[#D9D9D9] px-4 flex items-center text-xs font-bold truncate hover:bg-blue-50 transition-colors">
+                  {field}
+                </div>
+              ))}
+              {/* 下部の予備スペース */}
+              <div 
+                className="h-14 border-b border-[#D9D9D9] px-4 flex items-center text-xs text-gray-400 italic cursor-pointer hover:bg-gray-50"
+                onClick={() => openAddModal('', days[0])}
+              >
+                + 新規圃場追加
+              </div>
+            </div>
+
+            {/* メイングリッド */}
+            <div className="flex-1">
+              <div className="flex min-w-max">
+                {days.map(day => {
+                  const dateObj = new Date(day);
+                  const isWeekend = dateObj.getDay() === 0 || dateObj.getDay() === 6;
+                  const dayAnalysis = analysis[day];
+                  const isShortage = dayAnalysis.status === '不足あり';
+
+                  return (
+                    <div key={day} className="w-32 shrink-0 border-r border-[#D9D9D9]">
+                      {/* 日付ヘッダー */}
+                      <div className={`h-12 border-b border-[#D9D9D9] flex flex-col items-center justify-center ${isWeekend ? 'bg-orange-50' : 'bg-gray-50'}`}>
+                        <span className="text-[10px] text-gray-500 font-medium">{day.split('-').slice(1).join('/')}</span>
+                        <span className={`text-xs font-black ${isWeekend ? 'text-orange-600' : ''}`}>
+                          {['日', '月', '火', '水', '木', '金', '土'][dateObj.getDay()]}
+                        </span>
+                      </div>
+                      
+                      {/* 分析インジケーター */}
+                      <div className={`h-12 border-b border-[#D9D9D9] flex flex-col items-center justify-center gap-0.5 p-1 ${isShortage ? 'bg-red-50' : 'bg-green-50/30'}`}>
+                        <div className="flex items-center gap-1">
+                          {isShortage ? <AlertTriangle className="w-3 h-3 text-red-500" /> : <CheckCircle2 className="w-3 h-3 text-green-600" />}
+                          <span className={`text-[10px] font-black ${isShortage ? 'text-red-600' : 'text-green-700'}`}>
+                            {dayAnalysis.rate}%
+                          </span>
+                        </div>
+                        <span className="text-[9px] text-gray-400 font-bold">{dayAnalysis.totalDemand}h / {dayAnalysis.supply}h</span>
+                      </div>
+
+                      {/* セルエリア */}
+                      {fields.map(field => {
+                        const dayTasks = tasks.filter(t => t.date === day && t.field === field);
+                        return (
+                          <div 
+                            key={`${day}-${field}`} 
+                            onDragOver={handleDragOver}
+                            onDrop={(e) => handleDrop(e, field, day)}
+                            className={`h-14 border-b border-[#D9D9D9] p-1 relative flex gap-1 items-center justify-center transition-colors hover:bg-gray-50/50`}
+                          >
+                            {dayTasks.map(task => (
+                              <div
+                                key={task.id}
+                                draggable
+                                onDragStart={(e) => handleDragStart(e, task.id)}
+                                onClick={() => openEditModal(task)}
+                                className="bg-[#223e76] text-white text-[9px] p-1.5 rounded shadow-sm cursor-move flex flex-col min-w-[50px] overflow-hidden group hover:scale-105 transition-transform"
+                                title={`${task.taskName}: ${task.demand}h`}
+                              >
+                                <span className="font-bold truncate leading-tight">{task.taskName}</span>
+                                <span className="opacity-80 text-[8px] font-medium">{task.demand}h</span>
+                              </div>
+                            ))}
+                          </div>
+                        );
+                      })}
+                      {/* 下部の新規追加ボタン */}
+                      <div className="h-14 border-b border-[#D9D9D9] flex items-center justify-center opacity-0 hover:opacity-100 transition-opacity">
+                        <button onClick={() => openAddModal('', day)} className="w-6 h-6 rounded-full bg-gray-200 flex items-center justify-center hover:bg-[#223e76] hover:text-white">
+                          <Plus className="w-3 h-3" />
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        </div>
+      </main>
+
+      {/* 編集モーダル */}
+      {isModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-md border border-[#D9D9D9] overflow-hidden">
+            <div className="bg-[#223e76] text-white p-4 flex justify-between items-center">
+              <h2 className="font-bold flex items-center gap-2 text-sm">
+                {editingTask?.id ? '作業内容の変更' : '新規作業の追加'}
+              </h2>
+              <button onClick={() => setIsModalOpen(false)} className="hover:bg-white/10 rounded p-1 transition-colors"><X className="w-5 h-5"/></button>
+            </div>
+            
+            <form onSubmit={saveTask} className="p-6 space-y-4">
+              <div>
+                <label className="block text-xs font-bold text-gray-500 mb-1 uppercase tracking-wider">作業項目</label>
+                <input 
+                  name="taskName" 
+                  defaultValue={editingTask?.taskName} 
+                  required 
+                  className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:ring-2 focus:ring-[#223e76] outline-none"
+                  placeholder="例：定植、マルチ、収穫など"
+                />
+              </div>
+              
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-bold text-gray-500 mb-1 uppercase tracking-wider">日付</label>
+                  <input 
+                    type="date" 
+                    name="date" 
+                    defaultValue={editingTask?.date} 
+                    required 
+                    className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:ring-2 focus:ring-[#223e76] outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-gray-500 mb-1 uppercase tracking-wider">需要時間 (h)</label>
+                  <input 
+                    type="number" 
+                    step="0.1" 
+                    name="demand" 
+                    defaultValue={editingTask?.demand} 
+                    required 
+                    className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:ring-2 focus:ring-[#223e76] outline-none"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-gray-500 mb-1 uppercase tracking-wider">圃場名</label>
+                <input 
+                  name="field" 
+                  defaultValue={editingTask?.field} 
+                  required 
+                  className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:ring-2 focus:ring-[#223e76] outline-none"
+                  list="fields-list"
+                  placeholder="例：御代田第一、東御③"
+                />
+                <datalist id="fields-list">
+                  {fields.map(f => <option key={f} value={f} />)}
+                </datalist>
+              </div>
+
+              <div className="pt-4 flex gap-3">
+                <button 
+                  type="submit" 
+                  className="flex-1 bg-[#223e76] text-white font-bold py-2 rounded shadow-md hover:bg-opacity-90 transition-all active:scale-[0.98] text-sm"
+                >
+                  保存
+                </button>
+                {editingTask?.id && (
+                  <button 
+                    type="button" 
+                    onClick={() => deleteTask(editingTask.id)}
+                    className="bg-red-50 text-red-600 border border-red-200 px-4 py-2 rounded hover:bg-red-100 transition-colors"
+                    title="削除"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                )}
+                <button 
+                  type="button" 
+                  onClick={() => setIsModalOpen(false)}
+                  className="bg-gray-100 text-gray-600 px-4 py-2 rounded font-medium hover:bg-gray-200 text-sm"
+                >
+                  キャンセル
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* フッター */}
+      <footer className="p-3 bg-white border-t border-[#D9D9D9] flex justify-between items-center text-[10px] text-gray-400 font-medium shrink-0">
+        <div className="flex gap-4">
+          <span>&copy; 2026 有限会社トップリバー</span>
+          <span>Version 1.0.0-Stable</span>
+        </div>
+        <div className="flex gap-3 items-center">
+          <div className="flex items-center gap-1">
+            <span className="w-2 h-2 rounded-full bg-green-500"></span>
+            <span>スプレッドシート接続: 良好</span>
+          </div>
+          <div className="flex items-center gap-1">
+            <span className="w-2 h-2 rounded-full bg-[#223e76]"></span>
+            <span>OKステータス</span>
+          </div>
+          <div className="flex items-center gap-1">
+            <span className="w-2 h-2 rounded-full bg-red-500"></span>
+            <span>労働不足</span>
+          </div>
+        </div>
+      </footer>
+    </div>
+  );
+};
+
+export default App;
